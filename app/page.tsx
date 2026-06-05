@@ -45,7 +45,12 @@ export default function Home() {
   const asked = status !== "idle";
 
   return (
-    <main className="min-h-screen flex flex-col items-center px-5 sm:px-6 py-12 sm:py-20">
+    <main className="relative min-h-screen flex flex-col items-center px-5 sm:px-6 py-12 sm:py-20">
+      <header className="absolute top-0 left-0 px-5 sm:px-8 py-5 sm:py-6">
+        <span className="font-display text-2xl sm:text-3xl tracking-tight">
+          AUGUR
+        </span>
+      </header>
       <div className="w-full max-w-3xl flex flex-col items-center">
         <h1
           className={`font-display text-center transition-all duration-500 ${
