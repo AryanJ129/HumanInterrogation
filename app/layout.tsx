@@ -1,7 +1,13 @@
 import type { Metadata } from "next";
-import { Instrument_Serif, Inter } from "next/font/google";
+import { IBM_Plex_Mono, Instrument_Serif } from "next/font/google";
 import { Toaster } from "sonner";
 import "./globals.css";
+
+const plexMono = IBM_Plex_Mono({
+  weight: ["400", "500", "600"],
+  subsets: ["latin"],
+  variable: "--font-mono",
+});
 
 const instrumentSerif = Instrument_Serif({
   weight: "400",
@@ -9,16 +15,10 @@ const instrumentSerif = Instrument_Serif({
   variable: "--font-display",
 });
 
-const inter = Inter({
-  weight: ["400", "500"],
-  subsets: ["latin"],
-  variable: "--font-body",
-});
-
 export const metadata: Metadata = {
-  title: "AdReel — one photo in, a cinematic ad out",
+  title: "AUGUR — interrogate the world",
   description:
-    "Turn one product photo into an eight-second cinematic ad — a voice, a beat, and a hook that stops the scroll. Generated in minutes, not weeks.",
+    "Ask what humanity is reading, or how it feels about anything. Answered from live public data, with the numbers to prove it.",
 };
 
 export default function RootLayout({
@@ -27,7 +27,7 @@ export default function RootLayout({
   children: React.ReactNode;
 }>) {
   return (
-    <html lang="en" className={`${instrumentSerif.variable} ${inter.variable}`}>
+    <html lang="en" className={`${plexMono.variable} ${instrumentSerif.variable}`}>
       <body className="antialiased">
         {children}
         <Toaster theme="dark" position="bottom-center" />
