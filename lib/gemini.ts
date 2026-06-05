@@ -118,7 +118,14 @@ Rules:
 - For gdelt_* and hn, set query to the bare search term.
 - For a comparison question (X vs Y), pick the single primary subject for the tool fields and note the full comparison in interpretation.
 - If the question cannot be mapped to any tool, set tool to "none".
-- Respond with JSON only.`;
+- Respond with JSON only.
+
+Examples:
+- "What is the world reading about today?" -> {"tool":"wiki_top"}
+- "How much is the world reading about Bitcoin lately?" / "how many people searched X" / "how popular is X" -> {"tool":"wiki_article","article":"Bitcoin"} (attention for ONE named topic = wiki_article, never wiki_top)
+- "How has the mood on \\"artificial intelligence\\" shifted this year?" -> {"tool":"gdelt_tone","query":"artificial intelligence","timespan":"1y"}
+- "How loudly is the world covering \\"climate\\" right now?" -> {"tool":"gdelt_volume","query":"climate","timespan":"7d"}
+- "What is the tech community saying about Rust?" -> {"tool":"hn","query":"Rust"}`;
 
 /** Gemini call #1: route the question to a tool plan, or null if unmappable. */
 export async function planQuestion(question: string, today: string): Promise<Plan | null> {

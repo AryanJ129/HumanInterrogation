@@ -3,6 +3,7 @@
 // SourceResult. On any failure or empty data we throw an Error whose message is
 // plain language a user can read in the UI.
 
+import { findSnapshot } from "@/lib/gdelt-snapshots";
 import type { Plan, SeriesPoint, SourceResult } from "@/lib/types";
 
 // --- Shared constants ---------------------------------------------------------
@@ -75,6 +76,12 @@ async function fetchWiki(url: string): Promise<Response> {
       "Could not reach Wikipedia's pageviews service. Please try again in a moment.",
     );
   }
+}
+
+/** True when an error came from GDELT's per-IP rate limit. */
+function isGdeltRateLimit(err: unknown): boolean {
+  const message = err instanceof Error ? err.message : "";
+  return /rate-limiting|status 429/.test(message);
 }
 
 /** GET a GDELT timeline endpoint, retrying once after a pause if GDELT's
@@ -317,7 +324,23 @@ async function runGdeltTone(plan: Plan): Promise<SourceResult> {
   const timespan = plan.timespan ?? "3m";
   const url = gdeltUrl(query, "timelinetone", timespan);
 
-  const data = await fetchGdeltTimeline(url);
+  let data: GdeltTimelineResponse;
+  try {
+    data = await fetchGdeltTimeline(url);
+  } catch (err) {
+    // Vercel's shared egress IPs are often inside GDELT's per-IP rate limit.
+    // Serve a baked real-data snapshot rather than dying, labeled honestly.
+    const snapshot = isGdeltRateLimit(err) ? findSnapshot("timelinetone", query) : undefined;
+    if (snapshot) {
+      return {
+        points: snapshot.points,
+        label: `Average global news tone for ${query}`,
+        sourceLabel: `via GDELT global news - tone scale -10 to +10 (cached snapshot from ${snapshot.capturedOn}; GDELT is rate-limiting live calls)`,
+        raw: snapshot.points.slice(0, MAX_RAW_ROWS),
+      };
+    }
+    throw err;
+  }
   const series = data.timeline?.[0];
   const rows = series?.data;
   if (!rows || rows.length === 0) {
@@ -348,7 +371,21 @@ async function runGdeltVolume(plan: Plan): Promise<SourceResult> {
   const timespan = plan.timespan ?? "3m";
   const url = gdeltUrl(query, "timelinevolraw", timespan);
 
-  const data = await fetchGdeltTimeline(url);
+  let data: GdeltTimelineResponse;
+  try {
+    data = await fetchGdeltTimeline(url);
+  } catch (err) {
+    const snapshot = isGdeltRateLimit(err) ? findSnapshot("timelinevolraw", query) : undefined;
+    if (snapshot) {
+      return {
+        points: snapshot.points,
+        label: `Global news article volume for ${query}`,
+        sourceLabel: `via GDELT global news volume (cached snapshot from ${snapshot.capturedOn}; GDELT is rate-limiting live calls)`,
+        raw: snapshot.points.slice(0, MAX_RAW_ROWS),
+      };
+    }
+    throw err;
+  }
   const timeline = data.timeline;
   if (!timeline || timeline.length === 0) {
     throw new Error(`GDELT found no news coverage for "${query}" to count.`);
