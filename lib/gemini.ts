@@ -20,16 +20,22 @@ interface GenerateRequest {
 }
 
 /**
- * The free tier throws transient 503 UNAVAILABLE under load (seen in
- * practice). Retry twice with a short pause, switching to the fallback
- * model on the final attempt. Total worst-case stays well under the
- * route's maxDuration.
+ * The free tier throws transient 503 UNAVAILABLE under load and short-window
+ * 429s that clear in under a second ("retry in 748ms" seen in practice).
+ * Retry the primary model patiently, then try the fallback model once.
+ * Total worst-case stays well under the route's maxDuration.
  */
 async function generateWithRetry(req: GenerateRequest): Promise<string | undefined> {
   const client = getClient();
+  const attempts: Array<{ model: string; waitAfterFailureMs: number }> = [
+    { model: MODEL, waitAfterFailureMs: 1200 },
+    { model: MODEL, waitAfterFailureMs: 3000 },
+    { model: MODEL, waitAfterFailureMs: 1000 },
+    { model: FALLBACK_MODEL, waitAfterFailureMs: 0 },
+  ];
   let lastError: unknown;
-  for (let attempt = 1; attempt <= 3; attempt++) {
-    const model = attempt === 3 ? FALLBACK_MODEL : MODEL;
+  for (let i = 0; i < attempts.length; i++) {
+    const { model, waitAfterFailureMs } = attempts[i];
     try {
       const response = await client.models.generateContent({ model, ...req });
       return response.text;
@@ -40,10 +46,10 @@ async function generateWithRetry(req: GenerateRequest): Promise<string | undefin
           ? (err as { status: unknown }).status
           : undefined;
       const transient = status === 503 || status === 429;
-      if (!transient || attempt === 3) {
+      if (!transient || i === attempts.length - 1) {
         throw err;
       }
-      await new Promise((resolve) => setTimeout(resolve, 2500));
+      await new Promise((resolve) => setTimeout(resolve, waitAfterFailureMs));
     }
   }
   throw lastError;
@@ -152,9 +158,95 @@ export async function planQuestion(question: string, today: string): Promise<Pla
 }
 
 // ---------------------------------------------------------------------------
+// Heuristic router — used when the free-tier model quota is exhausted, so a
+// typed question still routes without a Gemini call. Deliberately simple.
+// ---------------------------------------------------------------------------
+
+const SUBJECT_STOPWORDS = new Set([
+  "a", "an", "the", "is", "are", "was", "were", "be", "been",
+  "how", "what", "which", "who", "when", "where", "why",
+  "much", "many", "most", "more", "lately", "recently",
+  "this", "that", "these", "those", "year", "week", "month", "day", "days",
+  "right", "now", "today", "yesterday",
+  "about", "on", "of", "in", "for", "to", "and", "or", "with",
+  "did", "does", "do", "has", "have", "had", "will",
+  "world", "people", "everyone", "region", "country",
+  "search", "searched", "searching", "searches",
+  "reading", "read", "reads",
+  "covering", "coverage", "cover", "covered",
+  "mood", "feel", "feels", "feeling", "sentiment", "tone",
+  "talking", "talk", "saying", "say",
+  "popular", "popularity", "attention", "interest", "interested",
+  "loud", "loudly", "shifted", "shift", "changed", "change",
+]);
+
+/** Pull the likely subject out of a question: a quoted phrase if present,
+ *  else whatever tokens survive the stopword filter. */
+function extractSubject(question: string): string | undefined {
+  const quoted = question.match(/"([^"]+)"|'([^']+)'/);
+  if (quoted) return (quoted[1] ?? quoted[2]).trim();
+  const tokens = question
+    .toLowerCase()
+    .replace(/[^a-z0-9\s-]/g, " ")
+    .split(/\s+/)
+    .filter((t) => t.length > 1 && !SUBJECT_STOPWORDS.has(t));
+  return tokens.length > 0 ? tokens.join(" ") : undefined;
+}
+
+/** Title-case a subject into a Wikipedia-style underscored title. */
+function toWikiTitle(subject: string): string {
+  const words = subject.split(/\s+/);
+  return (words[0].charAt(0).toUpperCase() + words[0].slice(1) + (words.length > 1 ? "_" + words.slice(1).join("_") : ""));
+}
+
+/** Keyword routing for when the model can't be reached. Null if no match. */
+export function heuristicPlan(question: string): Plan | null {
+  const q = question.toLowerCase();
+  const subject = extractSubject(question);
+
+  if (/hacker news|tech community|startup/.test(q)) {
+    return subject
+      ? { tool: "hn", query: subject, interpretation: "Hacker News pulse (heuristic routing)." }
+      : null;
+  }
+  if (/mood|sentiment|feel|tone|positive|negative/.test(q)) {
+    return subject
+      ? {
+          tool: "gdelt_tone",
+          query: subject,
+          timespan: /year/.test(q) ? "1y" : "3m",
+          interpretation: "Global news tone (heuristic routing).",
+        }
+      : null;
+  }
+  if (/loud|volume|how much.*(news|coverage)|covering|coverage/.test(q)) {
+    return subject
+      ? {
+          tool: "gdelt_volume",
+          query: subject,
+          timespan: /now|this week|week/.test(q) ? "7d" : "3m",
+          interpretation: "Global news volume (heuristic routing).",
+        }
+      : null;
+  }
+  if (!subject || /most.?read|top article|reading about today|what.*world.*reading/.test(q)) {
+    return { tool: "wiki_top", interpretation: "Top Wikipedia articles (heuristic routing)." };
+  }
+  // Default: attention for a named subject via its Wikipedia article.
+  return {
+    tool: "wiki_article",
+    article: toWikiTitle(subject),
+    interpretation: "Wikipedia attention timeline (heuristic routing).",
+  };
+}
+
+// ---------------------------------------------------------------------------
 // Synthesis schema (Gemini call #2).
 // ---------------------------------------------------------------------------
 
+// The chart series is built server-side from the source data — the model only
+// returns prose + chart labels. That keeps the output tiny (free-tier tokens),
+// fast, and makes it impossible for the model to misquote the series.
 const SYNTH_SCHEMA = {
   type: Type.OBJECT,
   properties: {
@@ -162,52 +254,82 @@ const SYNTH_SCHEMA = {
       type: Type.STRING,
       description: "2-4 plain-language sentences that cite the number that matters.",
     },
-    chart: {
-      type: Type.OBJECT,
-      properties: {
-        type: { type: Type.STRING, enum: ["line", "bar"] },
-        xLabel: { type: Type.STRING },
-        yLabel: { type: Type.STRING },
-        series: {
-          type: Type.ARRAY,
-          items: {
-            type: Type.OBJECT,
-            properties: {
-              x: { type: Type.STRING },
-              y: { type: Type.NUMBER },
-            },
-            required: ["x", "y"],
-          },
-        },
-      },
-      required: ["type", "xLabel", "yLabel", "series"],
-    },
+    chartType: { type: Type.STRING, enum: ["line", "bar"] },
+    xLabel: { type: Type.STRING },
+    yLabel: { type: Type.STRING },
   },
-  required: ["answer", "chart"],
+  required: ["answer", "chartType", "xLabel", "yLabel"],
 } as const;
 
 const SYNTH_SYSTEM = `You answer a question grounded strictly in the data points provided.
 
 - Write 2-4 plain-language sentences. Cite the specific number that matters. No hedging, no boilerplate, no "as an AI" or "based on the data provided" filler.
-- The chart must faithfully reflect the given data points — it may simply echo them.
-- Use a line chart for timelines (data over dates) and a bar chart for rankings or category comparisons.
+- If the question asks for something the data does not contain (e.g. regions), answer what the data does show and say plainly what it cannot.
+- chartType: "line" for timelines (data over dates), "bar" for rankings or category comparisons. xLabel/yLabel: short axis labels for the given data.
 - Respond with JSON only.`;
 
-/** Gemini call #2: grounded answer + faithful chart from a source result. */
+/** Build a ChartSpec directly from source points (capped). */
+export function chartFromPoints(
+  type: "line" | "bar",
+  xLabel: string,
+  yLabel: string,
+  points: SeriesPoint[],
+): ChartSpec {
+  return { type, xLabel, yLabel, series: points.slice(0, 120) };
+}
+
+/** True when the x values look like a date timeline. */
+function looksLikeTimeline(points: SeriesPoint[]): boolean {
+  return points.length > 0 && /^\d{4}-\d{2}-\d{2}/.test(points[0].x);
+}
+
+/**
+ * Deterministic last-resort answer computed from the real numbers, for when
+ * the free-tier model quota is exhausted. The data is still live and real —
+ * only the prose is templated.
+ */
+export function fallbackSynthesis(result: SourceResult): { answer: string; chart: ChartSpec } {
+  const points = result.points;
+  if (looksLikeTimeline(points)) {
+    let max = points[0];
+    let min = points[0];
+    for (const p of points) {
+      if (p.y > max.y) max = p;
+      if (p.y < min.y) min = p;
+    }
+    const latest = points[points.length - 1];
+    const round = (n: number) => (Number.isInteger(n) ? n.toLocaleString("en-US") : n.toFixed(2));
+    return {
+      answer:
+        `${result.label}: peaked at ${round(max.y)} on ${max.x}, ` +
+        `bottomed at ${round(min.y)} on ${min.x}, ` +
+        `most recently ${round(latest.y)} on ${latest.x}.`,
+      chart: chartFromPoints("line", "Date", result.label, points),
+    };
+  }
+  const top = points[0];
+  return {
+    answer: `${result.label}: "${top.x}" leads with ${top.y.toLocaleString("en-US")}, ahead of ${points
+      .slice(1, 3)
+      .map((p) => `"${p.x}" (${p.y.toLocaleString("en-US")})`)
+      .join(" and ")}.`,
+    chart: chartFromPoints("bar", "Item", result.label, points),
+  };
+}
+
+/** Gemini call #2: grounded answer; the chart series comes from the data itself. */
 export async function synthesize(
   question: string,
   result: SourceResult,
 ): Promise<{ answer: string; chart?: ChartSpec }> {
   const compactPoints = JSON.stringify(result.points);
-  const rawRows = Array.isArray(result.raw) ? result.raw.slice(0, 5) : [];
-  const rawBlock = rawRows.length > 0 ? `\nSample raw rows: ${JSON.stringify(rawRows)}` : "";
 
   const text = await generateWithRetry({
     contents: `${SYNTH_SYSTEM}
 
 Question: ${question}
 What the data measures: ${result.label}
-Data points: ${compactPoints}${rawBlock}`,
+Data points: ${compactPoints}`,
     config: {
       responseMimeType: "application/json",
       responseSchema: SYNTH_SCHEMA,
@@ -235,7 +357,10 @@ Data points: ${compactPoints}${rawBlock}`,
     throw new Error("Synthesis response had no answer");
   }
 
-  const chart = validateChart(obj.chart);
+  const chartType = obj.chartType === "bar" ? "bar" : "line";
+  const xLabel = typeof obj.xLabel === "string" ? obj.xLabel : "x";
+  const yLabel = typeof obj.yLabel === "string" ? obj.yLabel : "y";
+  const chart = validateChart(chartFromPoints(chartType, xLabel, yLabel, result.points));
   return chart ? { answer, chart } : { answer };
 }
 

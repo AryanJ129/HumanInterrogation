@@ -3,14 +3,56 @@
 // in that data with a chart as proof.
 
 import { NextResponse } from "next/server";
-import type { AskResponse } from "@/lib/types";
-import { planQuestion, synthesize, validateChart } from "@/lib/gemini";
+import type { AskResponse, Plan } from "@/lib/types";
+import {
+  fallbackSynthesis,
+  heuristicPlan,
+  planQuestion,
+  synthesize,
+  validateChart,
+} from "@/lib/gemini";
 import { runTool } from "@/lib/sources";
 
 export const maxDuration = 60;
 
 const UNMAPPABLE_MESSAGE =
   "I can answer questions about what the world is reading (Wikipedia attention) or how it is covering a topic (global news tone and volume) - try one of those.";
+
+// The example chips route deterministically — no planner call. They are the
+// demo script, so they must not spend (or depend on) free-tier model quota
+// for routing.
+const CHIP_PLANS: ReadonlyMap<string, Plan> = new Map<string, Plan>([
+  [
+    "what is the world reading about today?",
+    { tool: "wiki_top", interpretation: "Top Wikipedia articles by pageviews." },
+  ],
+  [
+    'how has the mood on "artificial intelligence" shifted this year?',
+    {
+      tool: "gdelt_tone",
+      query: "artificial intelligence",
+      timespan: "1y",
+      interpretation: "Global news tone for AI over the last year.",
+    },
+  ],
+  [
+    "how much is the world reading about bitcoin lately?",
+    {
+      tool: "wiki_article",
+      article: "Bitcoin",
+      interpretation: "Daily Wikipedia pageviews for Bitcoin.",
+    },
+  ],
+  [
+    'how loudly is the world covering "climate" right now?',
+    {
+      tool: "gdelt_volume",
+      query: "climate",
+      timespan: "7d",
+      interpretation: "Global news article volume for climate this week.",
+    },
+  ],
+]);
 
 interface AskBody {
   question?: unknown;
@@ -40,14 +82,23 @@ export async function POST(request: Request): Promise<NextResponse> {
 
   // --- Step 1: route the question to a tool plan ---
   let plan;
-  try {
-    plan = await planQuestion(question, todayUtc());
-  } catch (err) {
-    console.error("ask: plan failed:", err instanceof Error ? err.message : "unknown error");
-    return NextResponse.json(
-      { error: "The model could not route your question. Try again." },
-      { status: 502 },
-    );
+  const chipPlan = CHIP_PLANS.get(question.toLowerCase());
+  if (chipPlan) {
+    plan = chipPlan;
+  } else {
+    try {
+      plan = await planQuestion(question, todayUtc());
+    } catch (err) {
+      // Model quota exhausted or unreachable — route by keywords instead.
+      console.error("ask: plan failed:", err instanceof Error ? err.message : "unknown error");
+      plan = heuristicPlan(question);
+      if (!plan) {
+        return NextResponse.json(
+          { error: "The model could not route your question. Try again in a few seconds." },
+          { status: 502 },
+        );
+      }
+    }
   }
 
   if (!plan) {
@@ -65,15 +116,14 @@ export async function POST(request: Request): Promise<NextResponse> {
   }
 
   // --- Step 3: synthesize a grounded answer + chart ---
+  // If the model quota is exhausted, fall back to a deterministic answer
+  // computed from the real numbers — the data is live either way.
   let synthesis;
   try {
     synthesis = await synthesize(question, result);
   } catch (err) {
     console.error("ask: synthesize failed:", err instanceof Error ? err.message : "unknown error");
-    return NextResponse.json(
-      { error: "The model could not synthesize an answer. Try rephrasing." },
-      { status: 502 },
-    );
+    synthesis = fallbackSynthesis(result);
   }
 
   const chart = validateChart(synthesis.chart);
