@@ -68,8 +68,9 @@ export async function POST(
       config: {
         aspectRatio: "9:16",
         resolution: "720p",
+        // NOTE: no generateAudio flag — it's Vertex-only and the Gemini
+        // Developer API rejects it. Veo 3.1 audio is native + prompt-driven.
         negativePrompt: "blurry, distorted text, watermark, low quality",
-        generateAudio: true,
       },
     });
 
