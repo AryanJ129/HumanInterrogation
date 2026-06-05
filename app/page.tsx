@@ -2,6 +2,7 @@
 
 import { useState } from "react";
 import { toast } from "sonner";
+import AboutPanel from "@/components/AboutPanel";
 import AskBar from "@/components/AskBar";
 import ExampleChips from "@/components/ExampleChips";
 import Answer from "@/components/Answer";
@@ -51,6 +52,7 @@ export default function Home() {
           AUGUR
         </span>
       </header>
+      <AboutPanel />
       <div className="w-full max-w-3xl flex flex-col items-center">
         <h1
           className={`font-display text-center transition-all duration-500 ${
