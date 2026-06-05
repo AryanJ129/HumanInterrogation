@@ -78,12 +78,6 @@ async function fetchWiki(url: string): Promise<Response> {
   }
 }
 
-/** True when an error came from GDELT's per-IP rate limit. */
-function isGdeltRateLimit(err: unknown): boolean {
-  const message = err instanceof Error ? err.message : "";
-  return /rate-limiting|status 429/.test(message);
-}
-
 /** GET a GDELT timeline endpoint, retrying once after a pause if GDELT's
  *  1-request-per-5-seconds limit bites (seen in practice as either a 429 or
  *  a plain-text notice). */
@@ -328,9 +322,10 @@ async function runGdeltTone(plan: Plan): Promise<SourceResult> {
   try {
     data = await fetchGdeltTimeline(url);
   } catch (err) {
-    // Vercel's shared egress IPs are often inside GDELT's per-IP rate limit.
-    // Serve a baked real-data snapshot rather than dying, labeled honestly.
-    const snapshot = isGdeltRateLimit(err) ? findSnapshot("timelinetone", query) : undefined;
+    // GDELT rate-limits (1 req/5s per IP) and can be unreachable from shared
+    // cloud egress IPs entirely. Serve a baked real-data snapshot rather than
+    // dying, labeled honestly.
+    const snapshot = findSnapshot("timelinetone", query);
     if (snapshot) {
       return {
         points: snapshot.points,
@@ -375,7 +370,7 @@ async function runGdeltVolume(plan: Plan): Promise<SourceResult> {
   try {
     data = await fetchGdeltTimeline(url);
   } catch (err) {
-    const snapshot = isGdeltRateLimit(err) ? findSnapshot("timelinevolraw", query) : undefined;
+    const snapshot = findSnapshot("timelinevolraw", query);
     if (snapshot) {
       return {
         points: snapshot.points,
